@@ -1,45 +1,40 @@
 /**
  * acme_itemreceipt_gate_ue.js — Receipt gate: blocks Item Receipts created from an Inbound Shipment
- * when the shipment is not ready to be received.
+ * when the shipment is not ready to be received. This is THE control: it must run in every execution
+ * context (UI, "Receive Inbound Shipment" bulk job, CSV, web services, scripts) — see the deployment XML,
+ * which deliberately has no execution-context filter.
  *
- * beforeSubmit (create):
- *   R1  the shipment has at least one landed-cost row
- *   R2  the shipment's Landed Cost Status is Confirmed
- *   R3  the customs clearance number is set on the shipment and the customs segment on the receipt
+ * Rules live in acme_inbship_rules.js (shared with the Inbound Shipment UI hint):
+ *   R1 landed cost loaded · R2 LC status Confirmed · R3 customs number on shipment
+ *   R4 customs segment on header AND every received line · R5 lot = customs number (MX pedimento)
  * Receipts not linked to an inbound shipment are ignored.
- * Each rule can be set to warn-only via script parameter (logs instead of throwing).
+ * R1–R5 can each be set to warn-only via script parameter (audit log instead of block).
+ * Configuration / lookup failures always block (fail closed): a gate that silently lets goods in is worse
+ * than one that asks an admin to fix a parameter.
  *
  * @NApiVersion 2.1
  * @NScriptType UserEventScript
  * @NModuleScope SameAccount
  */
-define(['N/query', 'N/runtime', 'N/error', 'N/log'], (query, runtime, error, log) => {
+define(['N/runtime', 'N/error', 'N/log', './acme_inbship_rules'], (runtime, error, log, rules) => {
 
     const P = {
         enforceLc: 'custscript_acme_gate_enforce_lc',
         enforceLcStatus: 'custscript_acme_gate_enforce_lcstatus',
         enforceCustoms: 'custscript_acme_gate_enforce_customs',
+        enforceLot: 'custscript_acme_gate_enforce_lot',
+        lotSubsidiaries: 'custscript_acme_gate_lot_subsidiaries',
+        customsFormat: 'custscript_acme_gate_customs_format',
         confirmedId: 'custscript_acme_gate_lc_confirmed_id'
     };
-    const CUSTOMS_SEGMENT = 'cseg_acme_customs';
+    const ENFORCE_PARAM = { lc: P.enforceLc, lcstatus: P.enforceLcStatus, customs: P.enforceCustoms, lot: P.enforceLot };
 
     const param = (id) => runtime.getCurrentScript().getParameter({ name: id });
-
-    const shipmentFacts = (shipId) => {
-        const rows = query.runSuiteQL({
-            query: `SELECT s.shipmentnumber, s.custrecord_acme_inb_lc_status AS lcstatus,
-                           s.custrecord_acme_inb_customs_no AS customsno,
-                           (SELECT COUNT(*) FROM inboundshipmentlandedcost l WHERE l.landedcostinboundshipment = s.id) AS lcrows
-                    FROM inboundshipment s WHERE s.id = ?`,
-            params: [shipId]
-        }).asMappedResults();
-        return rows.length ? rows[0] : null;
-    };
+    const enforced = (rule) => rule === 'always' || !rules.isOff(param(ENFORCE_PARAM[rule]));
 
     const stop = (code, msg) => { throw error.create({ name: code, message: msg, notifyOff: true }); };
-    const check = (enforced, code, msg) => { if (enforced) stop(code, msg); else log.audit('gate warn-only', msg); };
 
-    // The header link can be empty; fall back to the line-level link.
+    // The header link can be empty (bulk job / partial receipts); fall back to the line-level link.
     const findShipment = (rec) => {
         const shipId = rec.getValue('inboundshipment');
         if (shipId) return shipId;
@@ -51,33 +46,40 @@ define(['N/query', 'N/runtime', 'N/error', 'N/log'], (query, runtime, error, log
         return null;
     };
 
+    // Lot = customs number applies to the subsidiaries listed in the parameter (blank = all).
+    const lotRuleApplies = (rec) => {
+        if (rules.isOff(param(P.enforceLot))) return false;
+        const list = String(param(P.lotSubsidiaries) || '').split(',').map((s) => s.trim()).filter(Boolean);
+        if (!list.length) return true;
+        return list.includes(String(rec.getValue('subsidiary') || ''));
+    };
+
     const beforeSubmit = (ctx) => {
         if (ctx.type !== ctx.UserEventType.CREATE) return;
         const rec = ctx.newRecord;
         const shipId = findShipment(rec);
         if (!shipId) return;
 
-        const f = shipmentFacts(shipId);
-        if (!f) { log.error('gate', 'shipment not found ' + shipId); return; }
-        const tag = (f.shipmentnumber || ('shipment ' + shipId)) + ': ';
-        const confirmedId = String(param(P.confirmedId) || '');
+        let f;
+        try {
+            f = rules.shipmentFacts(shipId);
+        } catch (e) {
+            log.error('gate', 'shipment lookup failed for ' + shipId + ': ' + e.message);
+            stop('ACME_GATE_ERROR', 'shipment ' + shipId + ': the readiness check failed (' + e.message + '). Receiving is blocked; contact the NetSuite team.');
+        }
+        const tag = ((f && f.shipmentnumber) || ('shipment ' + shipId)) + ': ';
+        const customsFormat = param(P.customsFormat);
+        const problems = rules.shipmentProblems(f, {
+            confirmedId: param(P.confirmedId),
+            customsFormat: customsFormat === null || customsFormat === undefined ? rules.DEFAULT_CUSTOMS_FORMAT : String(customsFormat)
+        });
+        if (f) problems.push(...rules.receiptProblems(rec, f, { checkLot: lotRuleApplies(rec) }));
 
-        if (Number(f.lcrows || 0) === 0) {
-            check(param(P.enforceLc) !== false, 'ACME_GATE_NO_LANDED_COST',
-                tag + 'landed cost is not loaded on the shipment. Costs must load it before receiving.');
-        }
-        if (!confirmedId) {
-            log.error('gate', 'parameter ' + P.confirmedId + ' not set, R2 skipped');
-        } else if (String(f.lcstatus || '') !== confirmedId) {
-            check(param(P.enforceLcStatus) !== false, 'ACME_GATE_LC_NOT_CONFIRMED',
-                tag + 'Landed Cost Status is not Confirmed. Costs must confirm the landed cost before receiving.');
-        }
-        const enforceCustoms = param(P.enforceCustoms) !== false;
-        if (!f.customsno) {
-            check(enforceCustoms, 'ACME_GATE_NO_CUSTOMS', tag + 'customs clearance number is missing on the shipment.');
-        } else if (!rec.getValue(CUSTOMS_SEGMENT)) {
-            check(enforceCustoms, 'ACME_GATE_NO_CUSTOMS', tag + 'customs segment is not set on the receipt.');
-        }
+        const ctxName = (runtime.executionContext || 'unknown');
+        problems.forEach((p) => {
+            if (enforced(p.rule)) stop(p.code, tag + p.msg);
+            log.audit('gate warn-only [' + ctxName + ']', tag + p.msg);
+        });
     };
 
     return { beforeSubmit };

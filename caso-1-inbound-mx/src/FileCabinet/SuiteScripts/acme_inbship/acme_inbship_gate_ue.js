@@ -1,44 +1,39 @@
 /**
  * acme_inbship_gate_ue.js — On the Inbound Shipment (view mode), disable the Receive button and show why
- * when the shipment is not ready to be received (same rules as acme_itemreceipt_gate_ue).
- * Never throws: a failure only means the button stays enabled.
+ * when the shipment is not ready to be received. Same rules as acme_itemreceipt_gate_ue (shared module).
+ *
+ * This is a usability hint only: it runs in the UI, on this form, and nowhere else. The bulk
+ * "Receive Inbound Shipment" page, CSV imports and integrations never see it; the Item Receipt gate is
+ * the control that actually blocks. Never throws: a failure only means the button stays enabled.
  *
  * @NApiVersion 2.1
  * @NScriptType UserEventScript
  * @NModuleScope SameAccount
  */
-define(['N/query', 'N/runtime', 'N/ui/serverWidget', 'N/log'], (query, runtime, serverWidget, log) => {
+define(['N/runtime', 'N/ui/serverWidget', 'N/log', './acme_inbship_rules'], (runtime, serverWidget, log, rules) => {
 
-    const P = { confirmedId: 'custscript_acme_gate2_lc_confirmed_id' };
+    const P = { confirmedId: 'custscript_acme_gate2_lc_confirmed_id', customsFormat: 'custscript_acme_gate2_customs_format' };
     const RECEIVABLE = ['inTransit', 'toBeShipped', 'partiallyReceived'];
-
-    const facts = (shipId) => {
-        const rows = query.runSuiteQL({
-            query: `SELECT s.custrecord_acme_inb_lc_status AS lcstatus, s.custrecord_acme_inb_customs_no AS customsno,
-                           (SELECT COUNT(*) FROM inboundshipmentlandedcost l WHERE l.landedcostinboundshipment = s.id) AS lcrows
-                    FROM inboundshipment s WHERE s.id = ?`, params: [shipId] }).asMappedResults();
-        return rows.length ? rows[0] : null;
-    };
 
     const beforeLoad = (ctx) => {
         try {
             if (ctx.type !== ctx.UserEventType.VIEW) return;
             const rec = ctx.newRecord;
             if (!RECEIVABLE.includes(String(rec.getValue('shipmentstatus') || ''))) return;
-            const f = facts(rec.id);
-            if (!f) return;
-            const confirmedId = String(runtime.getCurrentScript().getParameter({ name: P.confirmedId }) || '3');
-            const problems = [];
-            if (Number(f.lcrows || 0) === 0) problems.push('landed cost not loaded');
-            if (String(f.lcstatus || '') !== confirmedId) problems.push('Landed Cost Status is not Confirmed');
-            if (!f.customsno) problems.push('customs clearance number missing');
+            const f = rules.shipmentFacts(rec.id);
+            const fmt = runtime.getCurrentScript().getParameter({ name: P.customsFormat });
+            const problems = rules.shipmentProblems(f, {
+                confirmedId: runtime.getCurrentScript().getParameter({ name: P.confirmedId }),
+                customsFormat: fmt === null || fmt === undefined ? rules.DEFAULT_CUSTOMS_FORMAT : String(fmt)
+            });
             if (!problems.length) return;
 
             const b = ctx.form.getButton('receive');
             if (b) b.isDisabled = true;
             const msg = ctx.form.addField({ id: 'custpage_acme_gate_msg', type: serverWidget.FieldType.INLINEHTML, label: ' ' });
             msg.defaultValue = '<div style="background:#fde8e8;border:1px solid #d33;color:#900;padding:8px 12px">'
-                + '<b>Receiving blocked:</b> ' + problems.join(' · ') + '.</div>';
+                + '<b>Receiving blocked:</b> ' + problems.map((p) => p.msg).join(' · ')
+                + '<br><small>The same rules are enforced when the Item Receipt is saved, including from the Receive Inbound Shipment job.</small></div>';
             msg.updateLayoutType({ layoutType: serverWidget.FieldLayoutType.OUTSIDEABOVE });
         } catch (e) {
             log.error('acme_inbship_gate_ue beforeLoad', e.message);

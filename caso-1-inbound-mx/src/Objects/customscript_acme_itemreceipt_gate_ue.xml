@@ -1,5 +1,5 @@
 <usereventscript scriptid="customscript_acme_itemreceipt_gate_ue">
-  <description>Blocks item receipts from an Inbound Shipment that is not ready to be received (landed cost, customs).</description>
+  <description>Blocks item receipts from an Inbound Shipment that is not ready to be received (landed cost, customs number, customs segment on every line, lot = pedimento). Runs in ALL execution contexts.</description>
   <isinactive>F</isinactive>
   <name>ACME - Item Receipt gate</name>
   <notifyowner>T</notifyowner>
@@ -7,18 +7,31 @@
   <scriptcustomfields>
     <scriptcustomfield scriptid="custscript_acme_gate_enforce_lc">
       <fieldtype>CHECKBOX</fieldtype><label>Gate: enforce landed cost loaded</label><defaultchecked>T</defaultchecked>
-      <description>Unchecked = warn-only (log), no block.</description>
+      <description>Unchecked = warn-only (audit log), no block. Changing this in production is a controlled change: it is how goods enter without landed cost.</description>
     </scriptcustomfield>
     <scriptcustomfield scriptid="custscript_acme_gate_enforce_lcstatus">
       <fieldtype>CHECKBOX</fieldtype><label>Gate: enforce LC Status = Confirmed</label><defaultchecked>T</defaultchecked>
-      <description>Unchecked = warn-only (log), no block.</description>
+      <description>Unchecked = warn-only (audit log), no block.</description>
     </scriptcustomfield>
     <scriptcustomfield scriptid="custscript_acme_gate_enforce_customs">
-      <fieldtype>CHECKBOX</fieldtype><label>Gate: enforce customs number</label><defaultchecked>T</defaultchecked>
-      <description>Unchecked = warn-only (log), no block.</description>
+      <fieldtype>CHECKBOX</fieldtype><label>Gate: enforce customs number + segment (header and lines)</label><defaultchecked>T</defaultchecked>
+      <description>Unchecked = warn-only (audit log), no block.</description>
+    </scriptcustomfield>
+    <scriptcustomfield scriptid="custscript_acme_gate_enforce_lot">
+      <fieldtype>CHECKBOX</fieldtype><label>Gate: enforce lot = customs number (MX pedimento)</label><defaultchecked>T</defaultchecked>
+      <description>Unchecked = warn-only (audit log), no block. The MX localization bundle resolves the CFDI pedimento by item + location + lot, so the lot received must be the pedimento.</description>
+    </scriptcustomfield>
+    <scriptcustomfield scriptid="custscript_acme_gate_lot_subsidiaries">
+      <fieldtype>TEXT</fieldtype><label>Gate: subsidiaries where lot = customs number applies (ids, comma-separated; blank = all)</label>
+      <description>Set to the internal id of Andina MX so AR/CO receipts (customs segment only) are not subject to the lot rule.</description>
+    </scriptcustomfield>
+    <scriptcustomfield scriptid="custscript_acme_gate_customs_format">
+      <fieldtype>TEXT</fieldtype><label>Gate: regex the customs number must match (blank = no format check)</label><defaultvalue>^\d{15}$</defaultvalue>
+      <description>Spaces are removed before matching. Default = Mexican pedimento (15 digits).</description>
     </scriptcustomfield>
     <scriptcustomfield scriptid="custscript_acme_gate_lc_confirmed_id">
       <fieldtype>TEXT</fieldtype><label>Gate: LC Status 'Confirmed' internal id</label><defaultvalue>3</defaultvalue>
+      <description>Verify the id in each account (sandbox ids can differ). If blank the gate blocks every receipt (fail closed).</description>
     </scriptcustomfield>
   </scriptcustomfields>
   <scriptdeployments>
@@ -27,8 +40,12 @@
       <custscript_acme_gate_enforce_lc>T</custscript_acme_gate_enforce_lc>
       <custscript_acme_gate_enforce_lcstatus>T</custscript_acme_gate_enforce_lcstatus>
       <custscript_acme_gate_enforce_customs>T</custscript_acme_gate_enforce_customs>
+      <custscript_acme_gate_enforce_lot>T</custscript_acme_gate_enforce_lot>
+      <custscript_acme_gate_customs_format>^\d{15}$</custscript_acme_gate_customs_format>
       <custscript_acme_gate_lc_confirmed_id>3</custscript_acme_gate_lc_confirmed_id>
-      <executioncontext>CSVIMPORT|RESTWEBSERVICES|SUITELET|USERINTERFACE|WEBSERVICES</executioncontext>
+      <!-- No <executioncontext>: the deployment runs in EVERY context. The previous explicit list
+           (CSVIMPORT|RESTWEBSERVICES|SUITELET|USERINTERFACE|WEBSERVICES) left out the background context
+           the "Receive Inbound Shipment" bulk job runs under, so receipts created by the job were never gated. -->
       <isdeployed>T</isdeployed>
       <loglevel>AUDIT</loglevel>
       <recordtype>ITEMRECEIPT</recordtype>

@@ -1,5 +1,5 @@
 <usereventscript scriptid="customscript_acme_inbship_gate_ue">
-  <description>Disables Receive on Inbound Shipments that are not ready to be received.</description>
+  <description>UI hint: disables Receive on Inbound Shipments that are not ready to be received (same rules as the Item Receipt gate). Not a control by itself.</description>
   <isinactive>F</isinactive>
   <name>ACME - Inbound Shipment gate</name>
   <notifyowner>T</notifyowner>
@@ -7,12 +7,18 @@
   <scriptcustomfields>
     <scriptcustomfield scriptid="custscript_acme_gate2_lc_confirmed_id">
       <fieldtype>TEXT</fieldtype><label>LC Status 'Confirmed' internal id</label><defaultvalue>3</defaultvalue>
+      <description>Must match custscript_acme_gate_lc_confirmed_id on the Item Receipt gate.</description>
+    </scriptcustomfield>
+    <scriptcustomfield scriptid="custscript_acme_gate2_customs_format">
+      <fieldtype>TEXT</fieldtype><label>Regex the customs number must match (blank = no format check)</label><defaultvalue>^\d{15}$</defaultvalue>
+      <description>Must match custscript_acme_gate_customs_format on the Item Receipt gate.</description>
     </scriptcustomfield>
   </scriptcustomfields>
   <scriptdeployments>
     <scriptdeployment scriptid="customdeploy_acme_inbship_gate_ue">
       <allroles>T</allroles>
       <custscript_acme_gate2_lc_confirmed_id>3</custscript_acme_gate2_lc_confirmed_id>
+      <custscript_acme_gate2_customs_format>^\d{15}$</custscript_acme_gate2_customs_format>
       <executioncontext>USERINTERFACE</executioncontext>
       <isdeployed>T</isdeployed>
       <loglevel>AUDIT</loglevel>
